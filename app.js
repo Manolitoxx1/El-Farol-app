@@ -47,15 +47,18 @@ var STATE = {
     tables: [],
     menu: [],
     history: [],
+    ingredients: [],
     currentTableId: null,
     editingProductId: null,
     editingTableId: null,
+    editingIngredientId: null,
     isSaving: false,
     isConnected: false
 };
 
 var CURRENT_ROLE = localStorage.getItem('fudo_role') || null;
 var BARISTA_CATS = ['Cafetería', 'Bebidas', 'Cafetería fría', 'Té'];
+var activeZone = 'salon';
 
 
 
@@ -113,17 +116,305 @@ function init() {
             qsa('.nav-btn').forEach(function (b) { b.classList.remove('active'); });
             btn.classList.add('active');
             qsa('.view').forEach(function (v) { v.classList.remove('active'); });
-            $('view-' + btn.getAttribute('data-view')).classList.add('active');
+            var viewName = btn.getAttribute('data-view');
+            $('view-' + viewName).classList.add('active');
+            if (viewName === 'balance') {
+                renderBalance();
+            }
         });
     });
+
+    // Zone Selection Tabs for Mesas
+    qsa('.zone-tab').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            qsa('.zone-tab').forEach(function (t) { t.classList.remove('active'); });
+            tab.classList.add('active');
+            activeZone = tab.getAttribute('data-zone');
+            
+            // Show/hide sections
+            ['salon', 'terraza', 'pendientes'].forEach(function (z) {
+                var sec = $('zone-section-' + z);
+                if (sec) sec.style.display = (z === activeZone) ? 'block' : 'none';
+            });
+            renderTables();
+        });
+    });
+
+    // Auto-update size inputs based on type selector
+    var typeSelector = $('input-table-type');
+    if (typeSelector) {
+        typeSelector.addEventListener('change', function (e) {
+            var val = e.target.value;
+            var whRow = $('input-table-wh-row');
+            var radiusRow = $('input-table-radius-row');
+            if (val === 'round') {
+                if (whRow) whRow.style.display = 'none';
+                if (radiusRow) radiusRow.style.display = 'block';
+                $('input-table-radius').value = 10;
+                $('input-table-tip-container').style.display = 'block';
+            } else {
+                if (whRow) whRow.style.display = 'flex';
+                if (radiusRow) radiusRow.style.display = 'none';
+                if (val === 'table') {
+                    $('input-table-w').value = 12;
+                    $('input-table-h').value = 18;
+                    $('input-table-tip-container').style.display = 'block';
+                } else if (val === 'bar') {
+                    $('input-table-w').value = 20;
+                    $('input-table-h').value = 14;
+                    $('input-table-tip-container').style.display = 'block';
+                } else if (val === 'sofa') {
+                    $('input-table-w').value = 18;
+                    $('input-table-h').value = 14;
+                    $('input-table-tip-container').style.display = 'none';
+                }
+            }
+        });
+    }
+
+    // Drag & Drop zones setup
+    ['Salón', 'Terraza', 'Pendientes'].forEach(function (zoneName) {
+        var zoneKey = zoneName.toLowerCase().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u');
+        var grid = $('grid-' + zoneKey);
+        if (!grid) return;
+
+        grid.addEventListener('dragover', function (e) {
+            e.preventDefault();
+            grid.classList.add('drag-over');
+        });
+
+        grid.addEventListener('dragleave', function () {
+            grid.classList.remove('drag-over');
+        });
+
+        grid.addEventListener('drop', function (e) {
+            e.preventDefault();
+            grid.classList.remove('drag-over');
+            var tableId = e.dataTransfer.getData('text/plain');
+            var table = STATE.tables.find(function (t) { return t.id === tableId; });
+            if (!table) return;
+
+            // Check if dropped on another card
+            var targetCard = e.target.closest('.table-card');
+            if (targetCard) {
+                var targetEditBtn = targetCard.querySelector('.btn-table-edit');
+                var targetId = targetEditBtn ? targetEditBtn.getAttribute('data-id') : null;
+                if (targetId && targetId !== tableId) {
+                    var dragIdx = STATE.tables.findIndex(function (t) { return t.id === tableId; });
+                    table.zone = zoneName;
+                    STATE.tables.splice(dragIdx, 1);
+                    var targetIdx = STATE.tables.findIndex(function (t) { return t.id === targetId; });
+                    STATE.tables.splice(targetIdx, 0, table);
+                    saveAllTables();
+                    renderTables();
+                    return;
+                }
+            }
+
+            // If dropped on the grid background or zone changes
+            if (table.zone !== zoneName) {
+                table.zone = zoneName;
+                var dragIdx = STATE.tables.findIndex(function (t) { return t.id === tableId; });
+                STATE.tables.splice(dragIdx, 1);
+                STATE.tables.push(table);
+                saveAllTables();
+                renderTables();
+            }
+        });
+    });
+
+    // Balance view sub-tabs switching
+    var balanceTabs = qsa('.balance-tab');
+    balanceTabs.forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            balanceTabs.forEach(function (t) { t.classList.remove('active'); });
+            tab.classList.add('active');
+            var tabName = tab.getAttribute('data-tab');
+            qsa('.balance-sub-view').forEach(function (sv) {
+                sv.style.display = 'none';
+            });
+            $('balance-tab-' + tabName + '-content').style.display = 'block';
+            if (tabName === 'ingredients') {
+                renderIngredients();
+            } else {
+                renderRecipes();
+            }
+        });
+    });
+
+    // Add Raw Ingredient to Registry
+    var btnRegAddIng = $('btn-reg-add-ingredient');
+    if (btnRegAddIng) {
+        btnRegAddIng.addEventListener('click', function () {
+            var name = $('reg-ing-name').value.trim();
+            var unit = $('reg-ing-unit').value;
+            var cost = parseFloat($('reg-ing-cost').value);
+            if (name && !isNaN(cost) && cost >= 0) {
+                var ingId = genId();
+                db.ref('ingredients_registry/' + ingId).set({
+                    id: ingId,
+                    name: name,
+                    unit: unit,
+                    cost: cost
+                }).then(function () {
+                    $('reg-ing-name').value = '';
+                    $('reg-ing-cost').value = '';
+                    alert('Ingrediente registrado con éxito.');
+                }).catch(function (err) {
+                    alert('Error: ' + err.message);
+                });
+            } else {
+                alert('Por favor, ingresa un nombre y costo válido.');
+            }
+        });
+    }
+
+    // Search ingredients
+    var regIngSearch = $('reg-ing-search');
+    if (regIngSearch) {
+        regIngSearch.addEventListener('input', renderIngredients);
+    }
+
+    // Modal Ingredient Handlers
+    var btnModalIngCancel = $('btn-modal-ingredient-cancel');
+    if (btnModalIngCancel) {
+        btnModalIngCancel.addEventListener('click', function () {
+            $('modal-ingredient').classList.add('hidden');
+            STATE.editingIngredientId = null;
+        });
+    }
+
+    var btnModalIngSave = $('btn-modal-ingredient-save');
+    if (btnModalIngSave) {
+        btnModalIngSave.addEventListener('click', function () {
+            var name = $('input-ingredient-name').value.trim();
+            var unit = $('input-ingredient-unit').value;
+            var cost = parseFloat($('input-ingredient-cost').value);
+            if (name && !isNaN(cost) && cost >= 0 && STATE.editingIngredientId) {
+                db.ref('ingredients_registry/' + STATE.editingIngredientId).set({
+                    id: STATE.editingIngredientId,
+                    name: name,
+                    unit: unit,
+                    cost: cost
+                }).then(function () {
+                    $('modal-ingredient').classList.add('hidden');
+                    STATE.editingIngredientId = null;
+                    alert('Ingrediente actualizado.');
+                }).catch(function (err) {
+                    alert('Error: ' + err.message);
+                });
+            } else {
+                alert('Ingresa datos válidos.');
+            }
+        });
+    }
+
+    // Recipe Selectors
+    var recipeCatSelect = $('recipe-cat-select');
+    if (recipeCatSelect) {
+        recipeCatSelect.addEventListener('change', function (e) {
+            var cat = e.target.value;
+            var pSelect = $('recipe-prod-select');
+            pSelect.innerHTML = '<option value="">-- Elige Producto --</option>';
+            
+            $('recipe-ingredient-add-form').style.display = 'none';
+            $('recipe-summary-cards').style.display = 'none';
+            $('recipe-list-card').style.display = 'none';
+            $('recipe-empty-state').style.display = 'block';
+
+            if (cat) {
+                STATE.menu.filter(function (p) { return p.category === cat; }).forEach(function (p) {
+                    var opt = document.createElement('option');
+                    opt.value = p.id;
+                    opt.textContent = p.name;
+                    pSelect.appendChild(opt);
+                });
+            }
+        });
+    }
+
+    var recipeProdSelect = $('recipe-prod-select');
+    if (recipeProdSelect) {
+        recipeProdSelect.addEventListener('change', function (e) {
+            var pid = e.target.value;
+            if (pid) {
+                showRecipeDetails(pid);
+            } else {
+                $('recipe-ingredient-add-form').style.display = 'none';
+                $('recipe-summary-cards').style.display = 'none';
+                $('recipe-list-card').style.display = 'none';
+                $('recipe-empty-state').style.display = 'block';
+            }
+        });
+    }
+
+    var recipeIngSelect = $('recipe-ing-select');
+    if (recipeIngSelect) {
+        recipeIngSelect.addEventListener('change', function (e) {
+            var ingId = e.target.value;
+            var display = $('recipe-ing-unit-display');
+            if (ingId) {
+                var ing = STATE.ingredients.find(function (i) { return i.id === ingId; });
+                display.value = ing ? ing.unit : '';
+            } else {
+                display.value = '';
+            }
+        });
+    }
+
+    // Add ingredient to recipe
+    var btnRecipeAddIng = $('btn-recipe-add-ingredient');
+    if (btnRecipeAddIng) {
+        btnRecipeAddIng.addEventListener('click', function () {
+            var pid = $('recipe-prod-select').value;
+            var ingId = $('recipe-ing-select').value;
+            var qty = parseFloat($('recipe-ing-qty').value);
+            if (pid && ingId && !isNaN(qty) && qty > 0) {
+                var p = STATE.menu.find(function (x) { return x.id === pid; });
+                if (p) {
+                    if (!p.recipe) p.recipe = [];
+                    var existing = p.recipe.find(function (r) { return r.ingredientId === ingId; });
+                    if (existing) {
+                        existing.qty = qty;
+                    } else {
+                        p.recipe.push({ ingredientId: ingId, qty: qty });
+                    }
+                    
+                    // Recalculate cost
+                    var totalCost = 0;
+                    p.recipe.forEach(function (rItem) {
+                        var ing = STATE.ingredients.find(function (i) { return i.id === rItem.ingredientId; });
+                        if (ing) totalCost += rItem.qty * (ing.cost || 0);
+                    });
+                    p.preparationCost = totalCost;
+
+                    saveMenu();
+                    showRecipeDetails(pid);
+                    $('recipe-ing-qty').value = '';
+                    $('recipe-ing-select').value = '';
+                    $('recipe-ing-unit-display').value = '';
+                }
+            } else {
+                alert('Por favor, selecciona un ingrediente y cantidad válida.');
+            }
+        });
+    }
 
     // Add Table
     $('btn-add-table').addEventListener('click', function () {
         STATE.editingTableId = null;
-        $('modal-table-title').textContent = 'Nueva Mesa';
+        $('modal-table-title').textContent = 'Nuevo Elemento';
         $('input-table-name').value = '';
         $('input-table-zone').value = 'Salón';
+        $('input-table-type').value = 'table';
+        $('input-table-w').value = 12;
+        $('input-table-h').value = 18;
         $('input-table-tip').checked = false;
+        $('input-table-tip-container').style.display = 'block';
+        var whRow = $('input-table-wh-row');
+        var radiusRow = $('input-table-radius-row');
+        if (whRow) whRow.style.display = 'flex';
+        if (radiusRow) radiusRow.style.display = 'none';
         $('modal-table').classList.remove('hidden');
     });
     $('btn-modal-table-cancel').addEventListener('click', function () {
@@ -134,6 +425,18 @@ function init() {
         var name = $('input-table-name').value.trim();
         var zone = $('input-table-zone').value;
         var tip = $('input-table-tip').checked;
+        var type = $('input-table-type').value || 'table';
+        var w, h, radius;
+        if (type === 'round') {
+            radius = parseInt($('input-table-radius').value) || 10;
+            w = radius * 2;
+            h = w;
+        } else {
+            w = parseInt($('input-table-w').value) || (type === 'bar' ? 20 : type === 'sofa' ? 18 : 12);
+            h = parseInt($('input-table-h').value) || (type === 'bar' ? 14 : type === 'sofa' ? 14 : 18);
+            radius = null;
+        }
+        
         if (name) {
             if (STATE.editingTableId) {
                 var t = STATE.tables.find(function (x) { return x.id === STATE.editingTableId; });
@@ -141,10 +444,31 @@ function init() {
                     t.name = name;
                     t.zone = zone;
                     t.tip = tip;
+                    t.type = type;
+                    t.w = w;
+                    t.h = h;
+                    if (type === 'round') t.radius = radius;
+                    else delete t.radius;
                     saveTable(t);
                 }
             } else {
-                STATE.tables.push({ id: genId(), name: name, zone: zone, tip: tip, status: 'free', order: [] });
+                var rx = Math.round(10 + Math.random() * 30);
+                var ry = Math.round(10 + Math.random() * 30);
+                var newTable = { 
+                    id: genId(), 
+                    name: name, 
+                    zone: zone, 
+                    tip: tip, 
+                    type: type,
+                    w: w,
+                    h: h,
+                    x: rx,
+                    y: ry,
+                    status: 'free', 
+                    order: [] 
+                };
+                if (type === 'round') newTable.radius = radius;
+                STATE.tables.push(newTable);
                 saveAllTables();
             }
             renderTables();
@@ -204,7 +528,14 @@ function init() {
             var payment = $('order-payment-method').value;
             var recItems = t.order.map(function (it) {
                 var p = STATE.menu.find(function (x) { return x.id === it.productId; });
-                return { name: p ? p.name : '?', price: p ? p.price : 0, qty: it.qty, subtotal: (p ? p.price : 0) * it.qty };
+                return {
+                    productId: it.productId,
+                    name: p ? p.name : '?',
+                    price: p ? p.price : 0,
+                    qty: it.qty,
+                    subtotal: (p ? p.price : 0) * it.qty,
+                    category: p ? p.category : 'General'
+                };
             });
             if (t.tip) {
                 recItems.push({ name: 'Propina Sugerida (10%)', price: tipAmt, qty: 1, subtotal: tipAmt });
@@ -232,16 +563,38 @@ function init() {
             var payment = $('order-payment-method').value;
             var recItems = t.order.map(function (it) {
                 var p = STATE.menu.find(function (x) { return x.id === it.productId; });
-                return { name: p ? p.name : '?', price: p ? p.price : 0, qty: it.qty, subtotal: (p ? p.price : 0) * it.qty };
+                return {
+                    productId: it.productId,
+                    name: p ? p.name : '?',
+                    price: p ? p.price : 0,
+                    qty: it.qty,
+                    subtotal: (p ? p.price : 0) * it.qty,
+                    category: p ? p.category : 'General'
+                };
             });
             if (t.tip) {
                 recItems.push({ name: 'Propina Sugerida (10%)', price: tipAmt, qty: 1, subtotal: tipAmt });
             }
+            var preparationCost = 0;
+            t.order.forEach(function (it) {
+                var p = STATE.menu.find(function (x) { return x.id === it.productId; });
+                if (p) {
+                    var costVal = 0;
+                    if (typeof p.preparationCost === 'number') {
+                        costVal = p.preparationCost;
+                    } else if (p.ingredients) {
+                        p.ingredients.forEach(function (ing) { costVal += (ing.cost || 0); });
+                    }
+                    preparationCost += costVal * it.qty;
+                }
+            });
+
             var rec = {
                 id: genId(), date: new Date().toISOString(),
                 tableId: t.id, tableName: t.name, total: total,
                 paymentMethod: payment,
-                items: recItems
+                items: recItems,
+                preparationCost: preparationCost
             };
             db.ref('history').push(rec).catch(function (e) { console.error(e); alert('Error al guardar cobro: ' + e.message); });
             t.order = []; t.tickets = []; t.status = 'free';
@@ -340,9 +693,12 @@ function init() {
         var savedIsServer = localStorage.getItem('fudo_is_server') === 'true';
         PrinterManager.isServer = savedIsServer;
         chkIsServer.checked = savedIsServer;
+        document.body.classList.toggle('is-caja', savedIsServer);
         chkIsServer.addEventListener('change', function (e) {
             PrinterManager.isServer = e.target.checked;
             localStorage.setItem('fudo_is_server', e.target.checked);
+            document.body.classList.toggle('is-caja', e.target.checked);
+            renderTables();
         });
     }
 
@@ -421,20 +777,47 @@ function init() {
         STATE.menu = Object.values(snapshot.val() || {});
         renderMenu();
         if (STATE.currentTableId) renderOrderMenu();
+        if ($('view-balance') && $('view-balance').classList.contains('active')) {
+            renderBalance();
+        }
     }, function (error) {
         alert('Error de conexión a Menú: ' + error.message);
     });
 
     db.ref('history').on('value', function (snapshot) {
-        var rawHistory = Object.values(snapshot.val() || {});
-        STATE.history = rawHistory.map(function (h) {
+        var rawVal = snapshot.val() || {};
+        STATE.history = Object.keys(rawVal).map(function (key) {
+            var h = rawVal[key];
+            h.firebaseKey = key;
             if (h.items && !Array.isArray(h.items)) h.items = Object.values(h.items);
             return h;
         });
         renderHistory();
         updateDaily();
+        renderBestSellersChart();
     }, function (error) {
         alert('Error de conexión a Historial: ' + error.message);
+    });
+
+    db.ref('ingredients_registry').on('value', function (snapshot) {
+        var rawVal = snapshot.val() || {};
+        STATE.ingredients = Object.keys(rawVal).map(function (key) {
+            return rawVal[key];
+        });
+        recalculateAllRecipeCosts();
+        if ($('view-balance') && $('view-balance').classList.contains('active')) {
+            var activeSubTab = qs('.balance-tab.active');
+            if (activeSubTab) {
+                var tabName = activeSubTab.getAttribute('data-tab');
+                if (tabName === 'ingredients') {
+                    renderIngredients();
+                } else {
+                    renderRecipes();
+                }
+            }
+        }
+    }, function (error) {
+        alert('Error de conexión a Registro de Ingredientes: ' + error.message);
     });
 }
 
@@ -476,16 +859,75 @@ function applyRole() {
 
 // =================== Tables ===================
 function renderTables() {
-    ['salon', 'terraza', 'pendientes'].forEach(function (z) {
-        var el = $('grid-' + z);
-        if (el) el.innerHTML = '';
-    });
-    if (STATE.tables.length === 0) {
-        var g = $('grid-salon');
-        if (g) g.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:3rem;">Toca "Nueva Mesa" para empezar</div>';
-        return;
+    var canvasSalon = $('canvas-salon');
+    var canvasTerraza = $('canvas-terraza');
+    var gridSalon = $('grid-salon');
+    var gridTerraza = $('grid-terraza');
+    var gridPendientes = $('grid-pendientes');
+    
+    if (canvasSalon) canvasSalon.innerHTML = '';
+    if (canvasTerraza) canvasTerraza.innerHTML = '';
+    if (gridSalon) gridSalon.innerHTML = '';
+    if (gridTerraza) gridTerraza.innerHTML = '';
+    if (gridPendientes) gridPendientes.innerHTML = '';
+    
+    var isCaja = PrinterManager.isServer;
+    document.body.classList.toggle('is-caja', isCaja);
+    
+    var tabSalon = $('tab-zone-salon');
+    var tabTerraza = $('tab-zone-terraza');
+    if (tabSalon && tabTerraza) {
+        if (isCaja) {
+            tabSalon.textContent = 'Salón (Mapa)';
+            tabTerraza.textContent = 'Terraza (Mapa)';
+        } else {
+            tabSalon.textContent = 'Salón';
+            tabTerraza.textContent = 'Terraza';
+        }
     }
+
+    var salonCount = 0;
+    var terrazaCount = 0;
+    var pendientesCount = 0;
+
     STATE.tables.forEach(function (table) {
+        var type = table.type || 'table';
+        if (type === 'sofa' && !isCaja) return;
+        var zoneKey = (table.zone || 'salon').toLowerCase().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u');
+        if (zoneKey === 'salon') salonCount++;
+        else if (zoneKey === 'terraza') terrazaCount++;
+        else if (zoneKey === 'pendientes') pendientesCount++;
+    });
+
+    if (isCaja) {
+        if (activeZone === 'salon' && salonCount === 0 && canvasSalon) {
+            canvasSalon.innerHTML = '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--text-muted);width:100%;">Toca "Nueva Mesa" para empezar en el Salón</div>';
+        }
+        if (activeZone === 'terraza' && terrazaCount === 0 && canvasTerraza) {
+            canvasTerraza.innerHTML = '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;color:var(--text-muted);width:100%;">Toca "Nueva Mesa" para empezar en la Terraza</div>';
+        }
+        if (activeZone === 'pendientes' && pendientesCount === 0 && gridPendientes) {
+            gridPendientes.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:3rem;">No hay elementos pendientes</div>';
+        }
+    } else {
+        if (salonCount === 0 && gridSalon) {
+            gridSalon.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:2rem;">No hay mesas en el Salón</div>';
+        }
+        if (terrazaCount === 0 && gridTerraza) {
+            gridTerraza.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:2rem;">No hay mesas en la Terraza</div>';
+        }
+        if (pendientesCount === 0 && gridPendientes) {
+            gridPendientes.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--text-muted);padding:2rem;">No hay elementos pendientes</div>';
+        }
+    }
+
+    STATE.tables.forEach(function (table) {
+        var zoneKey = (table.zone || 'salon').toLowerCase().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u');
+        var type = table.type || 'table';
+        if (type === 'sofa' && !isCaja) return;
+        
+        if (isCaja && zoneKey !== activeZone) return;
+
         var subtotal = calcTotal(table.order);
         var total = subtotal + (table.tip ? subtotal * 0.1 : 0);
 
@@ -495,47 +937,257 @@ function renderTables() {
 
         var d = document.createElement('div');
         d.className = 'table-card' + (bandejaLista ? ' bandeja-lista' : '');
-        d.setAttribute('data-status', table.status);
-        var z = (table.zone || 'salon').toLowerCase().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u');
-        var iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="4" rx="1"/><path d="M5 11v6"/><path d="M19 11v6"/></svg>';
-        if (z === 'terraza') {
-            iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2"/><path d="M12 20v2"/><path d="M5 5l1.5 1.5"/><path d="M17.5 17.5L19 19"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M5 19l1.5-1.5"/><path d="M17.5 6.5L19 5"/><circle cx="12" cy="12" r="3"/></svg>';
-        } else if (z === 'pendientes') {
-            iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>';
+        d.setAttribute('data-status', table.status || 'free');
+        var type = table.type || 'table';
+        d.setAttribute('data-type', type);
+
+        var iconSvg = '';
+        if (type === 'sofa') {
+            iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10v8a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-8"/><path d="M2 14v-4a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v4"/><path d="M6 14h12"/></svg>';
+        } else if (type === 'bar') {
+            iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 18v2"/><path d="M16 18v2"/></svg>';
+        } else if (type === 'round') {
+            iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>';
+        } else {
+            if (zoneKey === 'terraza') {
+                iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v2"/><path d="M12 20v2"/><path d="M5 5l1.5 1.5"/><path d="M17.5 17.5L19 19"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M5 19l1.5-1.5"/><path d="M17.5 6.5L19 5"/><circle cx="12" cy="12" r="3"/></svg>';
+            } else {
+                iconSvg = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="4" rx="1"/><path d="M5 11v6"/><path d="M19 11v6"/></svg>';
+            }
         }
+
+        var amountStr = '';
+        if (type === 'sofa') {
+            amountStr = 'Sillón Decorativo';
+        } else {
+            amountStr = table.status !== 'free' ? fmt(total) : 'Libre';
+        }
+
         d.innerHTML = '<div class="table-status-indicator"></div>' +
+            '<div class="drag-handle">' +
+            '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">' +
+            '<circle cx="9" cy="5" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="9" cy="19" r="1.5" />' +
+            '<circle cx="15" cy="5" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="15" cy="19" r="1.5" />' +
+            '</svg>' +
+            '</div>' +
             '<div class="table-icon">' + iconSvg + '</div>' +
             '<div class="table-info"><div class="table-name">' + table.name + '</div>' +
-            '<div class="table-amount">' + (table.status !== 'free' ? fmt(total) : 'Libre') + '</div></div>' +
-            (bandejaLista ? '<div style="background:#10b981;color:#fff;font-size:0.75rem;padding:0.2rem 0.5rem;border-radius:4px;margin-top:0.5rem;text-align:center;">Bandeja Lista</div>' : '') +
+            '<div class="table-amount">' + amountStr + '</div></div>' +
+            (bandejaLista ? '<div style="background:#10b981;color:#fff;font-size:0.7rem;padding:0.15rem 0.35rem;border-radius:4px;margin-top:0.25rem;text-align:center;">Bandeja Lista</div>' : '') +
             '<div class="table-actions"><button class="btn-table-edit" data-id="' + table.id + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button><button class="btn-table-delete" data-id="' + table.id + '"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button></div>';
+
+        if (isCaja && (zoneKey === 'salon' || zoneKey === 'terraza')) {
+            var w, h;
+            if (type === 'round') {
+                var radius = table.radius || 10;
+                w = radius * 2;
+                var canvas = document.querySelector('.floor-plan-canvas');
+                var ratio = 16 / 9;
+                if (canvas && canvas.clientWidth && canvas.clientHeight) {
+                    ratio = canvas.clientWidth / canvas.clientHeight;
+                }
+                h = w * ratio;
+            } else {
+                w = table.w || (type === 'bar' ? 20 : type === 'sofa' ? 18 : 14);
+                h = table.h || (type === 'bar' ? 10 : type === 'sofa' ? 10 : 13);
+            }
+            var tx = (typeof table.x === 'number') ? table.x : 10;
+            var ty = (typeof table.y === 'number') ? table.y : 10;
+            
+            d.style.left = tx + '%';
+            d.style.top = ty + '%';
+            d.style.width = w + '%';
+            d.style.height = h + '%';
+
+            var handle = d.querySelector('.drag-handle');
+            if (handle) {
+                handle.addEventListener('pointerdown', function (e) {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    
+                    var canvas = d.parentElement;
+                    var rect = canvas.getBoundingClientRect();
+                    var startX = e.clientX;
+                    var startY = e.clientY;
+                    var initX = (typeof table.x === 'number') ? table.x : 10;
+                    var initY = (typeof table.y === 'number') ? table.y : 10;
+                    
+                    d.style.zIndex = 1000;
+                    
+                    // Capture pointer for reliable mobile drag
+                    handle.setPointerCapture(e.pointerId);
+                    
+                    // Prevent parent scroll while dragging
+                    var viewEl = d.closest('.view');
+                    var prevOverflow = '';
+                    if (viewEl) {
+                        prevOverflow = viewEl.style.overflowY;
+                        viewEl.style.overflowY = 'hidden';
+                    }
+
+                    function onPointerMove(moveEvent) {
+                        moveEvent.preventDefault();
+                        var dx = moveEvent.clientX - startX;
+                        var dy = moveEvent.clientY - startY;
+                        
+                        var pctDx = (dx / rect.width) * 100;
+                        var pctDy = (dy / rect.height) * 100;
+                        
+                        var newX = Math.max(0, Math.min(100 - w, initX + pctDx));
+                        var newY = Math.max(0, Math.min(100 - h, initY + pctDy));
+                        
+                        // Use 2 decimal places for smooth sub-pixel movement
+                        newX = Math.round(newX * 100) / 100;
+                        newY = Math.round(newY * 100) / 100;
+                        
+                        d.style.left = newX + '%';
+                        d.style.top = newY + '%';
+                        
+                        table.x = newX;
+                        table.y = newY;
+                    }
+
+                    function onPointerUp(upEvent) {
+                        handle.releasePointerCapture(upEvent.pointerId);
+                        document.removeEventListener('pointermove', onPointerMove);
+                        document.removeEventListener('pointerup', onPointerUp);
+                        d.style.zIndex = '';
+                        
+                        // Restore parent scroll
+                        if (viewEl) {
+                            viewEl.style.overflowY = prevOverflow;
+                        }
+                        
+                        // Round to 1 decimal for storage
+                        table.x = Math.round(table.x * 10) / 10;
+                        table.y = Math.round(table.y * 10) / 10;
+                        saveTable(table);
+                    }
+
+                    document.addEventListener('pointermove', onPointerMove);
+                    document.addEventListener('pointerup', onPointerUp);
+                });
+            }
+        }
+
+        // Long-press to show edit/delete on mobile
+        (function (card) {
+            var lpTimer = null;
+            var startX = 0, startY = 0;
+            card._wasLongPressed = false;
+
+            card.addEventListener('pointerdown', function (e) {
+                if (e.target.closest('.drag-handle') || e.target.closest('.btn-table-edit') || e.target.closest('.btn-table-delete')) return;
+                startX = e.clientX;
+                startY = e.clientY;
+                card._wasLongPressed = false;
+                lpTimer = setTimeout(function () {
+                    // Remove long-pressed from all other cards
+                    document.querySelectorAll('.table-card.long-pressed').forEach(function (c) {
+                        if (c !== card) c.classList.remove('long-pressed');
+                    });
+                    card.classList.add('long-pressed');
+                    card._wasLongPressed = true;
+                }, 600);
+            });
+
+            card.addEventListener('pointermove', function (e) {
+                if (lpTimer) {
+                    var dist = Math.sqrt(Math.pow(e.clientX - startX, 2) + Math.pow(e.clientY - startY, 2));
+                    if (dist > 10) { // Cancel only if finger moved more than 10px
+                        clearTimeout(lpTimer);
+                        lpTimer = null;
+                    }
+                }
+            });
+
+            card.addEventListener('pointerup', function () {
+                if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+            });
+
+            card.addEventListener('pointercancel', function () {
+                if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; }
+            });
+        })(d);
         d.addEventListener('click', function (e) {
-            if (!e.target.closest('.btn-table-delete') && !e.target.closest('.btn-table-edit')) openOrder(table.id);
+            if (d._wasLongPressed) {
+                d._wasLongPressed = false;
+                return;
+            }
+            if (!e.target.closest('.btn-table-delete') &&
+                !e.target.closest('.btn-table-edit') &&
+                !e.target.closest('.drag-handle')) {
+                if (type !== 'sofa') {
+                    openOrder(table.id);
+                }
+            }
         });
+
         var edit = d.querySelector('.btn-table-edit');
         edit.addEventListener('click', function (e) {
             e.stopPropagation();
             STATE.editingTableId = table.id;
-            $('modal-table-title').textContent = 'Editar Mesa';
+            $('modal-table-title').textContent = 'Editar Elemento';
             $('input-table-name').value = table.name;
             $('input-table-zone').value = table.zone || 'Salón';
+            $('input-table-type').value = type;
+            var whRow = $('input-table-wh-row');
+            var radiusRow = $('input-table-radius-row');
+            if (type === 'round') {
+                if (whRow) whRow.style.display = 'none';
+                if (radiusRow) radiusRow.style.display = 'block';
+                $('input-table-radius').value = table.radius || 10;
+            } else {
+                if (whRow) whRow.style.display = 'flex';
+                if (radiusRow) radiusRow.style.display = 'none';
+                $('input-table-w').value = table.w || (type === 'bar' ? 20 : type === 'sofa' ? 18 : 12);
+                $('input-table-h').value = table.h || (type === 'bar' ? 14 : type === 'sofa' ? 14 : 18);
+            }
             $('input-table-tip').checked = !!table.tip;
+            $('input-table-tip-container').style.display = (type === 'sofa') ? 'none' : 'block';
             $('modal-table').classList.remove('hidden');
         });
+
         var del = d.querySelector('.btn-table-delete');
         del.addEventListener('click', function (e) {
             e.stopPropagation();
-            if (table.status !== 'free') { alert('Mesa ocupada, no se puede eliminar.'); return; }
-            showConfirm('Eliminar esta mesa?', function () {
+            if (type !== 'sofa' && table.status !== 'free') { 
+                alert('Mesa ocupada, no se puede eliminar.'); 
+                return; 
+            }
+            showConfirm('¿Eliminar este elemento?', function () {
                 STATE.tables = STATE.tables.filter(function (x) { return x.id !== table.id; });
-                deleteTable(table.id); renderTables();
+                deleteTable(table.id); 
+                renderTables();
             });
         });
-        var zoneKey = table.zone ? table.zone.toLowerCase().replace(/[áàä]/g, 'a').replace(/[éèë]/g, 'e').replace(/[íìï]/g, 'i').replace(/[óòö]/g, 'o').replace(/[úùü]/g, 'u') : 'salon';
-        var container = $('grid-' + zoneKey);
-        if (container) container.appendChild(d);
+
+        if (zoneKey === 'salon') {
+            if (isCaja) {
+                if (canvasSalon) canvasSalon.appendChild(d);
+            } else {
+                if (gridSalon) gridSalon.appendChild(d);
+            }
+        } else if (zoneKey === 'terraza') {
+            if (isCaja) {
+                if (canvasTerraza) canvasTerraza.appendChild(d);
+            } else {
+                if (gridTerraza) gridTerraza.appendChild(d);
+            }
+        } else if (zoneKey === 'pendientes') {
+            if (gridPendientes) gridPendientes.appendChild(d);
+        }
     });
 }
+
+// Dismiss long-pressed state when tapping outside a table card
+document.addEventListener('pointerdown', function (e) {
+    if (!e.target.closest('.table-card')) {
+        document.querySelectorAll('.table-card.long-pressed').forEach(function (c) {
+            c.classList.remove('long-pressed');
+        });
+    }
+});
 
 // =================== Order Panel ===================
 var orderCatFilter = 'Todos';
@@ -688,6 +1340,7 @@ function renderOrderItems() {
 // =================== Menu ===================
 var menuCatFilter = 'Todos';
 function renderMenu() {
+    renderBestSellersChart();
     var bar = $('menu-categories-bar');
     bar.innerHTML = '';
     getCats().forEach(function (cat) {
@@ -735,17 +1388,102 @@ function renderHistory() {
     var list = STATE.history.slice().reverse();
     if (fd) list = list.filter(function (h) { return h.date.indexOf(fd) === 0; });
     if (fm) list = list.filter(function (h) { return h.date.indexOf(fm) === 0; });
+    
     var tr = list.reduce(function (s, h) { return s + h.total; }, 0);
     var te = list.filter(function (h) { return h.paymentMethod === 'Efectivo'; }).reduce(function (s, h) { return s + h.total; }, 0);
     var td = list.filter(function (h) { return h.paymentMethod === 'Débito'; }).reduce(function (s, h) { return s + h.total; }, 0);
     var tc = list.filter(function (h) { return h.paymentMethod === 'Crédito'; }).reduce(function (s, h) { return s + h.total; }, 0);
 
+    var totalNetRevenue = 0;
+    var totalInferredPeople = 0;
+    var totalRealUtility = 0;
+    var countWithPrepCost = 0;
+    
+    list.forEach(function (h) {
+        var saleNet = h.total;
+        var inferredPeopleInSale = 0;
+        
+        if (typeof h.preparationCost === 'number') {
+            totalRealUtility += (h.total - h.preparationCost);
+            countWithPrepCost++;
+        }
+
+        if (h.items) {
+            h.items.forEach(function (it) {
+                if (it.name === 'Propina Sugerida (10%)') {
+                    saleNet -= it.subtotal;
+                } else {
+                    var isBeverage = false;
+                    if (it.category && BARISTA_CATS.indexOf(it.category) >= 0) {
+                        isBeverage = true;
+                    } else {
+                        var p = STATE.menu.find(function (x) { return x.id === it.productId; });
+                        if (p && BARISTA_CATS.indexOf(p.category) >= 0) {
+                            isBeverage = true;
+                        } else if (!p) {
+                            var nameLower = (it.name || '').toLowerCase();
+                            var keywords = ['cafe', 'té', 'te', 'bebida', 'jugo', 'soda', 'agua', 'latte', 'cappuccino', 'espresso', 'moka', 'limonada', 'licuado'];
+                            keywords.forEach(function (kw) { if (nameLower.indexOf(kw) >= 0) isBeverage = true; });
+                        }
+                    }
+                    if (isBeverage) inferredPeopleInSale += it.qty;
+                }
+            });
+        }
+        if (inferredPeopleInSale === 0) inferredPeopleInSale = 1;
+        totalNetRevenue += saleNet;
+        totalInferredPeople += inferredPeopleInSale;
+    });
+
+    var ticketPromedioNeto = list.length > 0 ? Math.round(totalNetRevenue / list.length) : 0;
+    var ticketPromedioPersona = totalInferredPeople > 0 ? Math.round(totalNetRevenue / totalInferredPeople) : 0;
+    var realUtilityStr = countWithPrepCost > 0 ? fmt(totalRealUtility) : '-';
+
+    var zoneTotals = { 'Salón': 0, 'Terraza': 0, 'Otros': 0 };
+    list.forEach(function (h) {
+        var t = STATE.tables.find(function (x) { return x.id === h.tableId; });
+        var zone = t ? t.zone : null;
+        if (!zone) {
+            var name = (h.tableName || '').toLowerCase();
+            if (name.indexOf('terraza') >= 0) zone = 'Terraza';
+            else if (name.indexOf('pendientes') >= 0) zone = 'Pendientes';
+            else zone = 'Salón';
+        }
+        zoneTotals[zone] = (zoneTotals[zone] || 0) + h.total;
+    });
+
+    var hourCounts = {};
+    list.forEach(function (h) {
+        var d = new Date(h.date);
+        var hr = d.getHours();
+        hourCounts[hr] = (hourCounts[hr] || 0) + h.total;
+    });
+    var peakHour = null;
+    var peakAmount = 0;
+    Object.keys(hourCounts).forEach(function (hr) {
+        if (hourCounts[hr] > peakAmount) {
+            peakAmount = hourCounts[hr];
+            peakHour = hr;
+        }
+    });
+    var peakHourStr = peakHour !== null ? peakHour + ':00 - ' + (parseInt(peakHour) + 1) + ':00' : 'N/A';
+
     $('history-summary').innerHTML = '<div class="summary-card"><div class="summary-title">Total Recaudado</div><div class="summary-value">' + fmt(tr) + '</div></div>' +
-        '<div class="summary-card"><div class="summary-title">Ventas</div><div class="summary-value">' + list.length + '</div></div>' +
-        '<div class="summary-card" style="grid-column:1/-1; display:flex; justify-content:space-between; padding:1rem;">' +
-        '<div><small>Efectivo:</small> <b>' + fmt(te) + '</b></div>' +
-        '<div><small>Débito:</small> <b>' + fmt(td) + '</b></div>' +
-        '<div><small>Crédito:</small> <b>' + fmt(tc) + '</b></div></div>';
+        '<div class="summary-card"><div class="summary-title">Utilidad Real</div><div class="summary-value" style="color:var(--success);">' + realUtilityStr + '</div></div>' +
+        '<div class="summary-card"><div class="summary-title">Ventas / Comensales</div><div class="summary-value" style="font-size:1.4rem;">' + list.length + ' / ' + totalInferredPeople + ' <span style="font-size:0.75rem; color:var(--text-muted); font-weight:normal;">(inf)</span></div></div>' +
+        '<div class="summary-card"><div class="summary-title">Tkt Prom. (Neto / Persona)</div><div class="summary-value" style="font-size:1.35rem;">' + fmt(ticketPromedioNeto) + ' / ' + fmt(ticketPromedioPersona) + '</div></div>' +
+        '<div class="summary-card"><div class="summary-title">Hora Pico de Ventas</div><div class="summary-value" style="font-size:1.15rem; margin-top:0.35rem;">' + peakHourStr + '</div></div>' +
+        '<div class="summary-card" style="grid-column:1/-1; display:flex; justify-content:space-between; flex-wrap:wrap; gap:1rem; padding:1.25rem;">' +
+        '<div><small style="color:var(--text-muted); text-transform:uppercase; font-size:0.75rem;">Métodos de Pago:</small>' +
+        ' <span style="margin-left:0.5rem;">Efectivo: <b>' + fmt(te) + '</b></span>' +
+        ' <span style="margin-left:0.75rem;">Débito: <b>' + fmt(td) + '</b></span>' +
+        ' <span style="margin-left:0.75rem;">Crédito: <b>' + fmt(tc) + '</b></span></div>' +
+        '<div><small style="color:var(--text-muted); text-transform:uppercase; font-size:0.75rem;">Ingresos por Zona:</small>' +
+        ' <span style="margin-left:0.5rem;">Salón: <b>' + fmt(zoneTotals['Salón'] || 0) + '</b></span>' +
+        ' <span style="margin-left:0.75rem;">Terraza: <b>' + fmt(zoneTotals['Terraza'] || 0) + '</b></span>' +
+        ' <span style="margin-left:0.75rem;">Otros/Pend: <b>' + fmt((zoneTotals['Pendientes'] || 0) + (zoneTotals['Otros'] || 0)) + '</b></span></div>' +
+        '</div>';
+
     var hl = $('history-list');
     hl.innerHTML = '';
     if (list.length === 0) { hl.innerHTML = '<div style="padding:2rem;text-align:center;color:var(--text-muted);">Sin ventas</div>'; return; }
@@ -754,7 +1492,28 @@ function renderHistory() {
         var ic = r.items.reduce(function (s, i) { return s + i.qty; }, 0);
         var el = document.createElement('div');
         el.className = 'history-item';
-        el.innerHTML = '<div class="history-item-info"><h4>' + r.tableName + '</h4><div class="history-item-date">' + d.toLocaleDateString() + ' - ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</div><div class="history-item-details">' + ic + ' items &bull; ' + (r.paymentMethod || 'Efectivo') + '</div></div><div class="history-item-total">' + fmt(r.total) + '</div>';
+        
+        var utilityVal = (typeof r.preparationCost === 'number') ? fmt(r.total - r.preparationCost) : '-';
+        
+        el.innerHTML = '<div class="history-item-info"><h4>' + r.tableName + '</h4>' +
+            '<div class="history-item-date">' + d.toLocaleDateString() + ' - ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + '</div>' +
+            '<div class="history-item-details">' + ic + ' items &bull; ' + (r.paymentMethod || 'Efectivo') + ' &bull; Utilidad Real: <b>' + utilityVal + '</b></div></div>' +
+            '<div style="display:flex; align-items:center; gap:0.75rem;">' +
+            '<div class="history-item-total">' + fmt(r.total) + '</div>' +
+            (r.firebaseKey ? '<button class="btn-history-delete" title="Eliminar Venta"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' : '') +
+            '</div>';
+
+        var delBtn = el.querySelector('.btn-history-delete');
+        if (delBtn) {
+            delBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                showConfirm('¿Eliminar esta venta del historial? Se restará de los totales diarios, mensuales y anuales.', function () {
+                    db.ref('history/' + r.firebaseKey).remove().catch(function (error) {
+                        alert('Error al eliminar venta: ' + error.message);
+                    });
+                });
+            });
+        }
         hl.appendChild(el);
     });
 }
@@ -1134,4 +1893,297 @@ function renderKDS() {
 
         grid.appendChild(card);
     });
+}
+
+// =================== New Features (Charts & Balance) ===================
+function renderBestSellersChart() {
+    var chartContainer = $('sales-chart-section');
+    var chartList = $('sales-chart-list');
+    if (!chartContainer || !chartList) return;
+
+    var salesCounts = {};
+    STATE.history.forEach(function (h) {
+        if (h.items) {
+            h.items.forEach(function (it) {
+                if (it.name && it.name !== 'Propina Sugerida (10%)') {
+                    salesCounts[it.name] = (salesCounts[it.name] || 0) + it.qty;
+                }
+            });
+        }
+    });
+
+    var sortedProducts = Object.keys(salesCounts).map(function (name) {
+        return { name: name, qty: salesCounts[name] };
+    }).sort(function (a, b) {
+        return b.qty - a.qty;
+    });
+
+    var topProducts = sortedProducts.slice(0, 5);
+
+    if (topProducts.length === 0) {
+        chartContainer.style.display = 'none';
+        return;
+    }
+
+    chartContainer.style.display = 'block';
+    chartList.innerHTML = '';
+
+    var maxQty = topProducts[0].qty;
+
+    topProducts.forEach(function (item) {
+        var pct = maxQty > 0 ? (item.qty / maxQty) * 100 : 0;
+
+        var row = document.createElement('div');
+        row.className = 'chart-bar-row';
+        row.innerHTML = '<div class="chart-bar-label" title="' + item.name + '">' + item.name + '</div>' +
+            '<div class="chart-bar-track">' +
+            '<div class="chart-bar-fill" style="width: 0%;"></div>' +
+            '</div>' +
+            '<div class="chart-bar-value">' + item.qty + '</div>';
+
+        chartList.appendChild(row);
+
+        setTimeout(function () {
+            var fill = row.querySelector('.chart-bar-fill');
+            if (fill) fill.style.width = pct + '%';
+        }, 50);
+    });
+}
+
+function renderBalance() {
+    var activeSubTab = qs('.balance-tab.active');
+    if (!activeSubTab) {
+        var defaultTab = $('tab-balance-ingredients');
+        if (defaultTab) defaultTab.classList.add('active');
+        activeSubTab = defaultTab;
+    }
+    var tabName = activeSubTab ? activeSubTab.getAttribute('data-tab') : 'ingredients';
+    qsa('.balance-sub-view').forEach(function (sv) {
+        sv.style.display = 'none';
+    });
+    var contentEl = $('balance-tab-' + tabName + '-content');
+    if (contentEl) contentEl.style.display = 'block';
+    
+    if (tabName === 'ingredients') {
+        renderIngredients();
+    } else {
+        renderRecipes();
+    }
+}
+
+function renderIngredients() {
+    var tbody = $('reg-ingredients-list-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    
+    var q = ($('reg-ing-search').value || '').toLowerCase();
+    var filtered = STATE.ingredients.filter(function (ing) {
+        return ing.name.toLowerCase().indexOf(q) >= 0;
+    });
+
+    if (filtered.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:1.5rem; color:var(--text-muted);">No se encontraron ingredientes</td></tr>';
+        return;
+    }
+
+    filtered.forEach(function (ing) {
+        var tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid var(--border)';
+        tr.innerHTML = '<td style="padding:0.75rem 0.5rem; font-weight:500;">' + ing.name + '</td>' +
+            '<td style="padding:0.75rem 0.5rem; color:var(--text-muted);">' + (ing.unit === 'unidades' ? 'Unidades' : ing.unit) + '</td>' +
+            '<td style="padding:0.75rem 0.5rem; text-align:right; font-weight:600;">' + fmt(ing.cost) + ' / ' + ing.unit + '</td>' +
+            '<td style="padding:0.75rem 0.5rem; text-align:center; display:flex; gap:0.5rem; justify-content:center;">' +
+            '<button class="btn btn-outline btn-edit-ing" style="padding:0.25rem 0.5rem; font-size:0.8rem;">Editar</button>' +
+            '<button class="btn btn-danger btn-del-ing" style="padding:0.25rem 0.5rem;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
+            '</td>';
+        
+        tr.querySelector('.btn-edit-ing').addEventListener('click', function () {
+            STATE.editingIngredientId = ing.id;
+            $('modal-ingredient-title').textContent = 'Editar Ingrediente';
+            $('input-ingredient-name').value = ing.name;
+            $('input-ingredient-unit').value = ing.unit;
+            $('input-ingredient-cost').value = ing.cost;
+            $('modal-ingredient').classList.remove('hidden');
+        });
+
+        tr.querySelector('.btn-del-ing').addEventListener('click', function () {
+            showConfirm('¿Eliminar ' + ing.name + ' del registro? Se quitará de todas las recetas de productos.', function () {
+                db.ref('ingredients_registry/' + ing.id).remove();
+                
+                var menuChanged = false;
+                STATE.menu.forEach(function (p) {
+                    if (p.recipe) {
+                        var oldLen = p.recipe.length;
+                        p.recipe = p.recipe.filter(function (r) { return r.ingredientId !== ing.id; });
+                        if (p.recipe.length !== oldLen) {
+                            menuChanged = true;
+                            var total = 0;
+                            p.recipe.forEach(function (rItem) {
+                                var ig = STATE.ingredients.find(function (x) { return x.id === rItem.ingredientId; });
+                                if (ig) total += rItem.qty * (ig.cost || 0);
+                            });
+                            p.preparationCost = total;
+                        }
+                    }
+                });
+                if (menuChanged) {
+                    saveMenu();
+                }
+            });
+        });
+
+        tbody.appendChild(tr);
+    });
+}
+
+function renderRecipes() {
+    var catSelect = $('recipe-cat-select');
+    if (!catSelect) return;
+    
+    var selectedCat = catSelect.value;
+    catSelect.innerHTML = '<option value="">-- Categoria --</option>';
+    
+    var cats = {};
+    STATE.menu.forEach(function (p) { cats[p.category || 'General'] = true; });
+    Object.keys(cats).forEach(function (c) {
+        var opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        catSelect.appendChild(opt);
+    });
+
+    if (selectedCat) {
+        catSelect.value = selectedCat;
+        var pSelect = $('recipe-prod-select');
+        var selectedProd = pSelect.value;
+        pSelect.innerHTML = '<option value="">-- Elige Producto --</option>';
+        STATE.menu.filter(function (p) { return p.category === selectedCat; }).forEach(function (p) {
+            var opt = document.createElement('option');
+            opt.value = p.id;
+            opt.textContent = p.name;
+            pSelect.appendChild(opt);
+        });
+        if (selectedProd && STATE.menu.some(function (p) { return p.id === selectedProd; })) {
+            pSelect.value = selectedProd;
+            showRecipeDetails(selectedProd);
+        }
+    }
+}
+
+function showRecipeDetails(pid) {
+    var p = STATE.menu.find(function (x) { return x.id === pid; });
+    if (!p) return;
+
+    $('recipe-ingredient-add-form').style.display = 'flex';
+    $('recipe-summary-cards').style.display = 'grid';
+    $('recipe-list-card').style.display = 'block';
+    $('recipe-empty-state').style.display = 'none';
+
+    $('recipe-prod-price').textContent = fmt(p.price);
+
+    var ingSelect = $('recipe-ing-select');
+    var selectedIng = ingSelect.value;
+    ingSelect.innerHTML = '<option value="">-- Elige Ingrediente --</option>';
+    STATE.ingredients.forEach(function (ing) {
+        var opt = document.createElement('option');
+        opt.value = ing.id;
+        opt.textContent = ing.name + ' (' + ing.unit + ')';
+        ingSelect.appendChild(opt);
+    });
+    if (selectedIng && STATE.ingredients.some(function (i) { return i.id === selectedIng; })) {
+        ingSelect.value = selectedIng;
+    }
+
+    var tbody = $('recipe-ingredients-list-body');
+    tbody.innerHTML = '';
+    
+    var recipe = p.recipe || [];
+    var totalCost = 0;
+
+    if (recipe.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:1.5rem; color:var(--text-muted);">No hay ingredientes en esta receta.</td></tr>';
+    } else {
+        recipe.forEach(function (rItem) {
+            var ing = STATE.ingredients.find(function (i) { return i.id === rItem.ingredientId; });
+            if (!ing) return;
+            
+            var costSub = rItem.qty * (ing.cost || 0);
+            totalCost += costSub;
+
+            var tr = document.createElement('tr');
+            tr.style.borderBottom = '1px solid var(--border)';
+            tr.innerHTML = '<td style="padding:0.75rem 0.5rem; font-weight:500;">' + ing.name + '</td>' +
+                '<td style="padding:0.75rem 0.5rem; text-align:right;">' + rItem.qty + ' ' + ing.unit + '</td>' +
+                '<td style="padding:0.75rem 0.5rem; text-align:right; color:var(--text-muted);">' + fmt(ing.cost) + '</td>' +
+                '<td style="padding:0.75rem 0.5rem; text-align:right; font-weight:600;">' + fmt(costSub) + '</td>' +
+                '<td style="padding:0.75rem 0.5rem; text-align:center;">' +
+                '<button class="btn btn-danger btn-del-recipe-ing" style="padding:0.25rem 0.5rem;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>' +
+                '</td>';
+
+            tr.querySelector('.btn-del-recipe-ing').addEventListener('click', function () {
+                p.recipe = p.recipe.filter(function (x) { return x.ingredientId !== rItem.ingredientId; });
+                
+                var newTotal = 0;
+                p.recipe.forEach(function (x) {
+                    var ig = STATE.ingredients.find(function (i) { return i.id === x.ingredientId; });
+                    if (ig) newTotal += x.qty * (ig.cost || 0);
+                });
+                p.preparationCost = newTotal;
+
+                saveMenu();
+                showRecipeDetails(pid);
+            });
+
+            tbody.appendChild(tr);
+        });
+    }
+
+    var totalCostEl = $('recipe-total-cost');
+    totalCostEl.textContent = fmt(totalCost);
+
+    if (totalCost > p.price) {
+        totalCostEl.style.color = 'var(--danger)';
+    } else {
+        totalCostEl.style.color = 'var(--success)';
+    }
+
+    var margin = p.price - totalCost;
+    var marginPct = p.price > 0 ? Math.round((margin / p.price) * 100) : 0;
+    var marginEl = $('recipe-margin');
+    marginEl.textContent = fmt(margin) + ' (' + marginPct + '%)';
+    if (margin >= 0) {
+        marginEl.style.color = 'var(--success)';
+    } else {
+        marginEl.style.color = 'var(--danger)';
+    }
+}
+
+function recalculateAllRecipeCosts() {
+    if (!STATE.menu || !STATE.ingredients) return;
+    var menuChanged = false;
+    STATE.menu.forEach(function (p) {
+        var recipe = p.recipe || [];
+        var totalCost = 0;
+        var hasRecipe = (recipe.length > 0);
+        recipe.forEach(function (rItem) {
+            var ing = STATE.ingredients.find(function (i) { return i.id === rItem.ingredientId; });
+            if (ing) {
+                totalCost += rItem.qty * (ing.cost || 0);
+            }
+        });
+        if (hasRecipe) {
+            if (p.preparationCost !== totalCost) {
+                p.preparationCost = totalCost;
+                menuChanged = true;
+            }
+        } else {
+            if (p.preparationCost > 0) {
+                p.preparationCost = 0;
+                menuChanged = true;
+            }
+        }
+    });
+    if (menuChanged) {
+        saveMenu();
+    }
 }
